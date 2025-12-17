@@ -222,6 +222,24 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Player warning (anti-cheat)
+    socket.on('player_warning', ({ sessionId, reason }) => {
+        const session = sessions.get(sessionId);
+        if (session) {
+            const player = session.players.find(p => p.id === socket.id);
+            if (player) {
+                player.warnings = (player.warnings || 0) + 1;
+
+                // Notify host
+                if (session.hostSocketId) {
+                    io.to(session.hostSocketId).emit('leaderboard_update', {
+                        players: session.players
+                    });
+                }
+            }
+        }
+    });
+
     // Player is banned
     socket.on('ban_player', ({ sessionId, reason }) => {
         const session = sessions.get(sessionId);

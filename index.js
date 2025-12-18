@@ -24,7 +24,7 @@ io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
     // Admin creates a session
-    socket.on('create_session', ({ hostId }) => {
+    socket.on('create_session', ({ hostId, quizId }) => {
         // Check if host already has an active session
         let existingSessionId = null;
         for (const [sId, s] of sessions.entries()) {
@@ -36,31 +36,41 @@ io.on('connection', (socket) => {
 
         if (existingSessionId) {
             const session = sessions.get(existingSessionId);
-            session.hostSocketId = socket.id; // Update host socket ID
-            socket.join(existingSessionId);
 
-            // Send back existing session details
-            socket.emit('session_created', { sessionId: existingSessionId });
+            // If quizId is provided and different from session's quizId, destroy old session
+            if (quizId && session.quizId !== quizId) {
+                console.log(`Host ${hostId} switching quiz from ${session.quizId} to ${quizId}. Destroying old session ${existingSessionId}.`);
+                sessions.delete(existingSessionId);
+                // We don't return here, we proceed to create a NEW session below
+            } else {
+                // Restore existing session (same quiz or no quizId provided)
+                session.hostSocketId = socket.id; // Update host socket ID
+                socket.join(existingSessionId);
 
-            // Restore state to host
-            socket.emit('player_joined', { players: session.players });
-            if (session.currentQuestionIndex >= 0) {
-                // Send current question if quiz started
-                const currentQ = session.questions[session.currentQuestionIndex];
-                socket.emit('new_question', {
-                    question: currentQ,
-                    index: session.currentQuestionIndex,
-                    total: session.questions.length
-                });
+                // Send back existing session details
+                socket.emit('session_created', { sessionId: existingSessionId });
+
+                // Restore state to host
+                socket.emit('player_joined', { players: session.players });
+                if (session.currentQuestionIndex >= 0) {
+                    // Send current question if quiz started
+                    const currentQ = session.questions[session.currentQuestionIndex];
+                    socket.emit('new_question', {
+                        question: currentQ,
+                        index: session.currentQuestionIndex,
+                        total: session.questions.length
+                    });
+                }
+
+                console.log(`Host ${hostId} reconnected to session ${existingSessionId}`);
+                return;
             }
-
-            console.log(`Host ${hostId} reconnected to session ${existingSessionId}`);
-            return;
         }
 
         const sessionId = Math.random().toString(36).substring(2, 8).toUpperCase();
         sessions.set(sessionId, {
             hostId,
+            quizId, // Store quizId
             hostSocketId: socket.id,
             players: [],
             bannedPlayers: new Set(), // Track banned user IDs (socket IDs or user IDs if available)
@@ -70,7 +80,7 @@ io.on('connection', (socket) => {
         });
         socket.join(sessionId);
         socket.emit('session_created', { sessionId });
-        console.log(`Session ${sessionId} created by host ${hostId}`);
+        console.log(`Session ${sessionId} created by host ${hostId} for quiz ${quizId}`);
     });
 
     // User joins a session
@@ -247,7 +257,7 @@ io.on('connection', (socket) => {
             const player = session.players.find(p => p.id === socket.id);
             if (player) {
                 player.status = 'banned';
-                session.bannedPlayers.add(player.name); // Ban by name for persistence
+                session.bannedPlayers.add(player.name);
 
                 // Notify host
                 if (session.hostSocketId) {
@@ -255,20 +265,51 @@ io.on('connection', (socket) => {
                         playerId: socket.id,
                         playerName: player.name,
                         reason,
-                        players: session.players // Send updated list
+                        players: session.players
                     });
                 }
 
-                // Notify player (ack)
+                // Notify player
                 socket.emit('you_are_banned');
-
-                // We do NOT remove from session.players list so Host can see them as Banned (Red)
-                // But we disconnect them
-
-                // Disconnect socket
-                socket.disconnect();
                 console.log(`Player ${socket.id} (${player.name}) banned from session ${sessionId}`);
             }
+        }
+    });
+
+    // Player is unbanned
+    socket.on('unban_player', ({ sessionId, playerId }) => {
+        const session = sessions.get(sessionId);
+        if (session) {
+            const player = session.players.find(p => p.id === playerId);
+            if (player) {
+                player.status = 'active';
+                player.warnings = 0; // Reset warnings
+                session.bannedPlayers.delete(player.name);
+
+                // Notify host (update leaderboard)
+                if (session.hostSocketId) {
+                    io.to(session.hostSocketId).emit('leaderboard_update', {
+                        players: session.players
+                    });
+                }
+
+                // Notify player
+                io.to(playerId).emit('you_are_unbanned');
+                console.log(`Player ${playerId} (${player.name}) unbanned in session ${sessionId}`);
+            }
+        }
+    });
+
+    // Host resets session (clears data)
+    socket.on('reset_session', ({ sessionId }) => {
+        const session = sessions.get(sessionId);
+        if (session && session.hostSocketId === socket.id) {
+            // Notify all players
+            io.to(sessionId).emit('session_closed');
+
+            // Delete session
+            sessions.delete(sessionId);
+            console.log(`Session ${sessionId} reset by host ${session.hostId}`);
         }
     });
 

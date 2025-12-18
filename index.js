@@ -194,8 +194,16 @@ io.on('connection', (socket) => {
                     total: session.questions.length
                 });
             } else {
+                // Quiz ended
+                // Unban all players so they can see the end screen and join next game
+                session.players.forEach(p => {
+                    p.status = 'active';
+                    p.warnings = 0;
+                });
+                session.bannedPlayers.clear();
+
                 io.to(sessionId).emit('quiz_ended', {
-                    finalScores: session.players.filter(p => p.status !== 'banned')
+                    finalScores: session.players
                 });
             }
         }
